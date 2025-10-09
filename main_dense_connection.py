@@ -393,7 +393,7 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
             p_hist = p_hist.cpu().numpy()
             sc = ax.scatter(bin_centers, p_hist, s=15, alpha=0.5, label=rf'$N = {{{Ls[L_i]}}}^2$')
 
-        ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', label=rf'$\sim s^{{{slope:.2f}}}$')
+        ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', alpha=0.5, label=rf'$\sim s^{{{slope:.2f}}}$')
         ax.set_xscale('log')
         ax.set_yscale('log')
         # ax.set_xlim(0.7, 4000)
@@ -405,6 +405,19 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
         plt.savefig(f'histograms/{name}_layer{layer_idx}.png',
                     bbox_inches='tight', dpi=300)
         plt.savefig(f'histograms/{name}_layer{layer_idx}.svg',
+                    bbox_inches='tight', dpi=300)
+        plt.close()
+
+        fig_finite, ax_finite = plt.subplots(figsize=(5, 4))
+        for L_i, histogram_L in enumerate(all_histograms):
+            sc_finite = ax_finite.scatter(bin_centers/Ls[L_i], p_hist*(bin_centers**(-1*slope)), s=15, alpha=0.5)
+        ax_finite.set_xscale('log')
+        ax_finite.set_yscale('log')
+        ax_finite.set_xlabel(r'$s/L^2$')
+        ax_finite.set_ylabel(rf'$s^{{{-1*slope:.2f}}} P(s)$')
+        plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.png',
+                    bbox_inches='tight', dpi=300)
+        plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.svg',
                     bbox_inches='tight', dpi=300)
         plt.close()
 
