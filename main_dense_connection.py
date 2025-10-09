@@ -13,6 +13,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import plt_config
 
 from cluster_finding_dense import find_cluster_dense_connection
+from avalanche_extraction import avalanche_extraction
 
 matplotlib.use('Agg')
 color = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -119,16 +120,8 @@ class Model:
         x = (x + (l1 + 2 * l2 + 2 * l3 + l4) * self.dt / 6).clamp(0, 1)
         return s, x
 
-    def LRO_metric(self, avalanche_stats):
-        # (n_layers, 7)
-        correlation_length, percolation_prob, slope, intercept, r, max_bin, max_dist = avalanche_stats.transpose(0, 1)
-        # metric = -correlation_length * 5 / self.L + (slope + 2) ** 2 + (r.abs() - 1) ** 2 \
-        #          + (max_bin - np.log10(self.L * self.L)) ** 2 + max_dist ** 2
-        metric = -correlation_length / 10 + max_dist ** 2
-        return metric  # (n_layers,)
-
     @torch.no_grad()
-    def dynamics(self, n_steps, transient_steps, coarse_grain_steps=10, connection_dist=5, plot=False, init_ground_state=False):
+    def dynamics(self, n_steps, transient_steps, coarse_grain_steps=1, connection_dist=10, plot=False, init_ground_state=False):
         print(f'L = {self.L} gamma = {self.gamma:.3f} Jz = {self.Jz:.3f} Simulating transient steps: {transient_steps}')
 
         # compiled_step = torch.compile(self.RK4)
@@ -159,7 +152,7 @@ class Model:
             self.s, self.x = compiled_step(self.s, self.x)
             spin_traj.append(self.s > 0)
 
-        avalanche_stats_all = torch.zeros(self.n_layers, 7)
+        avalanche_stats_all = torch.zeros(self.n_layers, 5)
         metrics = torch.zeros(self.n_layers, 1)
         t_windows_all = torch.zeros(self.n_layers, 1)
         histograms = np.empty(self.n_layers, dtype=object)
@@ -170,17 +163,25 @@ class Model:
             window_steps = coarse_grain_steps
             t_idx = (torch.arange(int(n_steps / window_steps)) * window_steps).to(torch.int64)
             flip_traj_i = spin_traj_i[t_idx].clone().diff(dim=0)
+
+            '''#Original cluster-finding code (YH)
             flip_traj_i = flip_traj_i.permute(1, 2, 3, 0).reshape(self.batch, self.L * self.L, -1)
-            label, clusters, durations, Rs, Rs_t, is_percolating = \
-                find_cluster_dense_connection(flip_traj_i, self.edges, self.coordinate, connection_dist)
-            avalanche_stats_i, histogram_i = self.avalanche_stats([clusters, Rs, is_percolating])
+            _, clusters, _, Rs, _, is_percolating = \
+                find_cluster_dense_connection(flip_traj_i, self.edges, self.coordinate, connection_dist)'''
+
+            #New avalanche-finding code (Chesson)
+            flip_traj_i = flip_traj_i.permute(1, 0, 2, 3)
+            temp_clusters = []
+            for j in range(batch):
+                temp_clusters.append(avalanche_extraction(flip_traj_i[j], connection_dist, self.dt))
+            clusters = [item for sublist in temp_clusters for item in sublist]
+
+            avalanche_stats_i, histogram_i, phase_i = self.avalanche_stats(torch.tensor(clusters))
             avalanche_stats_all[layer_idx] = torch.tensor(avalanche_stats_i, dtype=torch.float32)
-            metric = self.LRO_metric(avalanche_stats_all[layer_idx].reshape(1, 7))
-            metrics[layer_idx] = metric
             t_windows_all[layer_idx] = coarse_grain_steps * connection_dist
             histograms[layer_idx] = histogram_i
 
-        avalanche_stats_all = torch.cat([avalanche_stats_all, metrics, t_windows_all], dim=1)
+        avalanche_stats_all = torch.cat([avalanche_stats_all, t_windows_all], dim=1)
 
         if plot:
             self.plot_histogram_all_layers(histograms, f'{self.name_str}_{coarse_grain_steps}_{connection_dist}_all')
@@ -194,18 +195,16 @@ class Model:
             torch.save(avalanche_stats_all, f'{self.data_dir}/avalanche_stats_{self.name_str}_{self.repeat_idx}.pt')
             # torch.save(mean_flip, f'{self.data_dir}/mean_flip_{self.name_str}_{self.repeat_idx}.pt')
 
-        return
+        return histograms
 
     def avalanche_stats(self, data):
-        # cluster_sizes, _, Rs, _, is_percolating = data
-        cluster_sizes, Rs, is_percolating = data
+        cluster_sizes = data
         mask = cluster_sizes > 0
         cluster_sizes = cluster_sizes[mask].float()
-        Rs = Rs[mask]
-        is_percolating = is_percolating[mask]
 
         if len(cluster_sizes) <= 2:
-            return [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan], None
+            print("Phase: no_dynamics")
+            return [np.nan, np.nan, np.nan, np.nan, np.nan], None, "no_dynamics"
 
         log_cluster_sizes = cluster_sizes.log10()
 
@@ -230,21 +229,14 @@ class Model:
         p_hist = hist / hist.sum()
         p_hist = p_hist[hist > 0]
 
-        non_percolating_mask = ~is_percolating.bool()
-        s = cluster_sizes[non_percolating_mask]
-        Rs = Rs[non_percolating_mask]
-        correlation_length = (((2 * Rs ** 2 * s ** 2).sum() / (s ** 2).sum()).sqrt()).cpu().numpy().item()
-        percolation_prob = is_percolating.float().mean().cpu().numpy().item()
 
         bin_centers = bin_centers[hist > 0]
         hist = hist[hist > 0]
 
         histogram = [bin_centers, p_hist]
 
-        # torch.save([bin_centers, p_hist], f'{self.histogram_dir}/{self.name_str}_{self.repeat_idx}.pt')
 
         try:
-            # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
             slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
                                                     p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy())
             n_bins = len(bin_centers)
@@ -255,10 +247,32 @@ class Model:
             n_bins = 0
             max_bin = 0
             max_dist = 0
+        
+        phase = None
+        has_LRO = (slope < -1.5) & (slope > -2.6) & (np.abs(r) > 0.95) & (max_bin > np.log10(L**2) - 0.5) & (max_dist < 0.5)
+        rigid = (max_bin > np.log10(L**2) - 0.5) & (max_dist > 1)
+        LRO_to_rigid = (max_bin > np.log10(L**2) - 0.5) & (max_dist < 1) & (max_dist > 0.5)
+        LRO_to_SRO = (slope < -1.5) & (slope > -2.6) & (np.abs(r) > 0.95) & (max_bin < np.log10(L**2) - 0.5) \
+                    & (max_bin > np.log10(L**2) - 1.5)
+        SRO = (max_bin < np.log10(L**2) - 1.5) & (max_bin > 0.1)
+        no_dynamics = (max_bin < 0.1)
+        if has_LRO:
+            phase = "has_LRO"
+        elif rigid:
+            phase = "rigid"
+        elif LRO_to_rigid:
+            phase = "LRO_to_rigid"
+        elif LRO_to_SRO:
+            phase = "LRO_to_SRO"
+        elif SRO:
+            phase = "SRO"
+        elif no_dynamics:
+            phase = "no_dynamics"
+        print("Phase: " + str(phase))
 
-        stats = [correlation_length, percolation_prob, slope, intercept, r, max_bin, max_dist]
+        stats = [slope, intercept, r, max_bin, max_dist]
 
-        return stats, histogram
+        return stats, histogram, phase
 
     def plot_histogram(self, histogram, name):
         bin_centers, p_hist = histogram
@@ -326,8 +340,9 @@ class Model:
         plt.savefig(f'{self.histogram_dir}/{name}.svg',
                     bbox_inches='tight', dpi=300)
 
-        ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black')
+        ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', label=rf'$\sim s^{{{slope:.2f}}}$')
         print(f'Fitted slope: {slope:.4f}, intercept: {intercept:.4f}')
+        ax.legend()
         plt.savefig(f'{self.histogram_dir}/{name}_with_fit.png',
                     bbox_inches='tight', dpi=300)
         plt.savefig(f'{self.histogram_dir}/{name}_with_fit.svg',
@@ -357,36 +372,69 @@ class Model:
                         bbox_inches='tight', dpi=300)
             plt.close()
 
+def plot_histogram_all_sizes(all_histograms, name, Ls):
+    for layer_idx in range(len(all_histograms[0])):
+        fig, ax = plt.subplots(figsize=(5, 4))
+        for L_i, histogram_L in enumerate(all_histograms):
+            try:
+                bin_centers, p_hist = histogram_L[layer_idx]
+            except TypeError:
+                continue
+            if L_i == len(all_histograms) - 1:
+                try:
+                    # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
+                    slope, intercept, r, p, se = linregress(
+                        bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
+                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy())
+                except:
+                    slope, intercept, r, p, se = [np.nan, np.nan, np.nan, np.nan, np.nan]
+
+            bin_centers = bin_centers.cpu().numpy()
+            p_hist = p_hist.cpu().numpy()
+            sc = ax.scatter(bin_centers, p_hist, s=15, alpha=0.5, label=rf'$N = {{{Ls[L_i]}}}^2$')
+
+        ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', label=rf'$\sim s^{{{slope:.2f}}}$')
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        # ax.set_xlim(0.7, 4000)
+        # ax.set_ylim(2e-8, 1.5)
+        ax.set_xlabel('Avalanche Size s')
+        ax.set_ylabel('Probability P(s)')
+        ax.legend(fontsize=16)
+        # ax.set_title(f'{self.name_str} {slope:.2f}')
+        plt.savefig(f'histograms/{name}_layer{layer_idx}.png',
+                    bbox_inches='tight', dpi=300)
+        plt.savefig(f'histograms/{name}_layer{layer_idx}.svg',
+                    bbox_inches='tight', dpi=300)
+        plt.close()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--index', type=int, default=0)
-    parser.add_argument('-b', '--batch', type=int, default=1)
+    parser.add_argument('-b', '--batch', type=int, default=10)
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
     parser.add_argument('--n_layers', type=int, default=2, help='Number of layers in the model')
-    parser.add_argument('--n_intervals', type=int, default=1, help='Number of intervals to divide the dynamics data')
     parser.add_argument('--n_steps', type=int, default=4000, help='Number of steps for the dynamics simulation')
     parser.add_argument('--transient_steps', type=int, default=2000, help='Number of transient steps before dynamics')
-    parser.add_argument('--coarse_grain_steps', type=int, default=2, help='Number of steps for coarse graining')
-    parser.add_argument('--connection_dist', type=int, default=25, help='Connection distance for cluster finding')
-    parser.add_argument('--plot', action='store_true', help='Whether to plot snapshots during simulation')
-    parser.add_argument('--use_GPU', action='store_true', help='Whether to use GPU')
-    parser.add_argument('--Ls', type=str, default='[16]')
+    parser.add_argument('--coarse_grain_steps', type=int, default=1, help='Number of steps for coarse graining')
+    parser.add_argument('--connection_dists', type=str, default='[95]', help='Connection distance for cluster finding')
+    parser.add_argument('--plot', type=bool, default=True, help='Whether to plot snapshots during simulation')
+    parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
+    parser.add_argument('--Ls', type=str, default='[64, 128, 256]')
     parser.add_argument('--gammas', type=str, default='[0.2]')
     parser.add_argument('--Jzs', type=str, default='[3.5]')
     parser.add_argument('--out', type=str, default='../test_0')
-    parser.add_argument('--init_ground_state', action='store_true',
-                        help='Whether to initialize the ground state before dynamics')
+    parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
     index = args.index
     batch = args.batch
     Jz_std = args.Jz_std
     n_layers = args.n_layers
-    n_intervals = args.n_intervals
     n_steps = args.n_steps
     transient_steps = args.transient_steps
     coarse_grain_steps = args.coarse_grain_steps
-    connection_dist = args.connection_dist
+    connection_dists = eval(args.connection_dists)
     plot = args.plot
     use_GPU = args.use_GPU
     Ls = eval(args.Ls)
@@ -406,24 +454,17 @@ if __name__ == '__main__':
     delta = 0.75
     init_scale = 1
 
-    # tw_reference = np.load('optimal_tw.npy')
-    # Jz_reference = np.linspace(1.5, 5.5, 41)
-    # log_gamma_reference = np.linspace(-2, 1, 46)
-    # n_layers_reference = 11
-    #
-    # interpolators = []
-    # for i in range(n_layers_reference):
-    #     interpolators.append(RegularGridInterpolator((Jz_reference, log_gamma_reference), tw_reference[i, :, :]))
-
-    out_dir = args.out
     os.makedirs(out_dir, exist_ok=True)
-    for L in Ls:
-        for Jz in Jzs:
-            for gamma in gammas:
-                # t_windows = np.array([interpolators[i]((Jz, math.log10(gamma))) for i in range(n_layers_reference)])
-                dt = 0.048 / gamma ** (1 / 3)
-                model = Model(batch, L, n_layers, Jz, gamma, g, delta, dt, init_scale, J=None, repeat_idx=index,
-                              data_dir=out_dir, save=True)
-                model.dynamics(n_steps, transient_steps, plot=plot, init_ground_state=init_ground_state,
-                               coarse_grain_steps=coarse_grain_steps, connection_dist=connection_dist)
-
+    for Jz in Jzs:
+        for gamma in gammas:
+            for connection_dist in connection_dists:
+                all_histograms = []
+                for L in Ls:
+                    dt = 0.048 / gamma ** (1 / 3)
+                    model = Model(batch, L, n_layers, Jz, gamma, g, delta, dt, init_scale, J=None, repeat_idx=index,
+                                data_dir=out_dir, save=True)
+                    histograms_L = model.dynamics(n_steps, transient_steps, plot=plot, init_ground_state=init_ground_state,
+                                coarse_grain_steps=coarse_grain_steps, connection_dist=connection_dist)
+                    all_histograms.append(histograms_L)
+                if plot:
+                    plot_histogram_all_sizes(all_histograms, f'{Ls}_{gamma:.3f}_{Jz:.3f}_tw_{coarse_grain_steps}_{connection_dist}', Ls)
