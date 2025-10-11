@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import time
 
 
 #Extracts distribution of avalanches' sizes, given the trajectory of all lattice spins
@@ -7,6 +8,9 @@ import torch
 def avalanche_extraction(data, time_window, dt):
 
     data = data.cpu().numpy()
+    t_add = 0.0
+    t_combine = 0.0
+    t_update = 0.0
 
     T = np.size(data, axis=0)
     sz = [np.size(data, axis=1), np.size(data, axis=2)]
@@ -21,16 +25,16 @@ def avalanche_extraction(data, time_window, dt):
     #Iterates over each timestep of the spin configuration's evolution
     for t in range(T):
 
-        spin_flips = data[:, :, :]
-
         #Only investigates a given timestep if a spin flip occurs
-        if any(element == True for element in np.ndarray.flatten(spin_flips[t])):
+        if any(element == True for element in np.ndarray.flatten(data[t])):
 
             #Establishes indices at which all flips occur at this timestep
-            flipping_array = np.where(spin_flips[t]) ###NEED TO ADJUST THIS "[0]" TO BETTTER ACCOUNT FOR BATCHES OF SIZE > 1
+            flipping_array = np.where(data[t])
 
             #Iterates over all flipped spins
             for n in range(len(flipping_array[0])):
+
+                t0 = time.time()
 
                 neighbor_list, index_list = get_nearest_neighbors(flipping_array, sz, n)
                 ###print('Neighbors: ' + str(neighbor_list))
@@ -49,6 +53,9 @@ def avalanche_extraction(data, time_window, dt):
                             avalanche[2].append(0) #Specifies that 0 time has passed since this spin flipped
                             no_neighbors = False
                             existing_avalanches.append(avalanche)
+
+                t1 = time.time()
+                t_add += t1-t0
 
                 #Creates new, combined avalanche which combines the size and recent spins flips from two constituent avalanches
                 #Process allows for the combination of up to 4 avalanches at the same time step
@@ -70,6 +77,9 @@ def avalanche_extraction(data, time_window, dt):
                         recent_avalanches.remove(avalanche) #removes all of the avalanches which have now combined from the recent_avalanches list
                     recent_avalanches.append(combined_avalanche) #replaces them with the new, combined avalanche
 
+                t2 = time.time()
+                t_combine += t2-t1
+                
                 if no_neighbors:
                     ###print('Neighbor not found!')
                     recent_avalanches.append([1, [index_list], [0], []]) #creates a new avalanches of initial size 1, at site [i, j], in which the [i, j] site flip occurred 0 timesteps ago, and which has no "passive" spins
@@ -77,6 +87,8 @@ def avalanche_extraction(data, time_window, dt):
 
         ###print('Recent avalanches before updating: ' + str(recent_avalanches))
 
+        t3 = time.time()
+        
         #Updating procedure for all avalanches at the end of each timestep
         for avalanche in recent_avalanches:
             indices_to_remove = []
@@ -106,12 +118,20 @@ def avalanche_extraction(data, time_window, dt):
         ###print('Recent avalanches at end of timestep (T = ' + str(float((t+1)*dt)) + '): ' + str(recent_avalanches))
         ###print('Current avalanche sizes: ' + str(avalanche_sizes))
 
+        t4 = time.time()
+        t_update += t4-t3
+
 
     #Write remaining avalanches at end of simulation to avalanche_sizes
     for avalanche in recent_avalanches:
         avalanche_sizes.append(avalanche[0])
 
 
+    print(f"Total time to add new avalanches: {str(t_add // 3600)} hrs, {str((t_add % 3200) // 60)} min, {((t_add % 3200) % 60):.3f} sec")
+    print(f"Total time to combine avalanches: {str(t_combine // 3600)} hrs, {str((t_combine % 3200) // 60)} min, {((t_combine % 3200) % 60):.3f} sec")
+    print(f"Total time to update all avalanches: {str(t_update // 3600)} hrs, {str((t_update % 3200) // 60)} min, {((t_update % 3200) % 60):.3f} sec")
+    t_total = t_add+t_combine+t_update
+    print(f"Total avalanche extraction time: {str(t_total // 3600)} hrs, {str((t_total % 3200) // 60)} min, {((t_total % 3200) % 60):.3f} sec")
     return avalanche_sizes
 
 

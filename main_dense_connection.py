@@ -11,6 +11,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import plt_config
+import json
 
 from cluster_finding_dense import find_cluster_dense_connection
 from avalanche_extraction import avalanche_extraction
@@ -25,7 +26,7 @@ color = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
 class Model:
     def __init__(self, batch, L, n_layers=11, Jz=1, gamma=0.2, g=2, delta=0.75, dt=0.05, init_scale=1,
-                 J=None, Jz_std=0, repeat_idx=0, save=True, data_dir='/mnt/out/data'):
+                 J=None, Jz_std=0, repeat_idx=0, save=True, data_dir='data'):
         self.batch = batch
         self.L = L
         self.n_layers = n_layers
@@ -164,17 +165,28 @@ class Model:
             t_idx = (torch.arange(int(n_steps / window_steps)) * window_steps).to(torch.int64)
             flip_traj_i = spin_traj_i[t_idx].clone().diff(dim=0)
 
-            '''#Original cluster-finding code (YH)
+            '''#Avalanche extraction (from trajectories, with YH's original cluster-finding code)
             flip_traj_i = flip_traj_i.permute(1, 2, 3, 0).reshape(self.batch, self.L * self.L, -1)
             _, clusters, _, Rs, _, is_percolating = \
                 find_cluster_dense_connection(flip_traj_i, self.edges, self.coordinate, connection_dist)'''
 
-            #New avalanche-finding code (Chesson)
+            #Avalanche extraction (from trajectories, with Chesson's code)
             flip_traj_i = flip_traj_i.permute(1, 0, 2, 3)
             temp_clusters = []
             for j in range(batch):
-                temp_clusters.append(avalanche_extraction(flip_traj_i[j], connection_dist, self.dt))
+                temp_clusters_j = avalanche_extraction(flip_traj_i[j], connection_dist, self.dt)
+                with open(f'{self.data_dir}/{self.name_str}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_clusters_sizes_{j}.json', 'w') as f:
+                    json.dump(temp_clusters_j, f)
+                temp_clusters.append(temp_clusters_j)
             clusters = [item for sublist in temp_clusters for item in sublist]
+
+            '''#Avalanche extraction (from .json files)
+            temp_clusters = []
+            for j in range(batch):
+                with open(f'{self.data_dir}/{self.name_str}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_clusters_sizes_{j}.json', 'r') as f:
+                    temp_clusters_j = json.load(f)
+                temp_clusters.append(temp_clusters_j)
+            clusters = [item for sublist in temp_clusters for item in sublist]'''
 
             avalanche_stats_i, histogram_i, phase_i = self.avalanche_stats(torch.tensor(clusters))
             avalanche_stats_all[layer_idx] = torch.tensor(avalanche_stats_i, dtype=torch.float32)
@@ -425,7 +437,7 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--index', type=int, default=0)
-    parser.add_argument('-b', '--batch', type=int, default=10)
+    parser.add_argument('-b', '--batch', type=int, default=1)
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
     parser.add_argument('--n_layers', type=int, default=2, help='Number of layers in the model')
     parser.add_argument('--n_steps', type=int, default=4000, help='Number of steps for the dynamics simulation')
@@ -434,10 +446,10 @@ if __name__ == '__main__':
     parser.add_argument('--connection_dists', type=str, default='[95]', help='Connection distance for cluster finding')
     parser.add_argument('--plot', type=bool, default=True, help='Whether to plot snapshots during simulation')
     parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
-    parser.add_argument('--Ls', type=str, default='[64, 128, 256]')
+    parser.add_argument('--Ls', type=str, default='[16]')
     parser.add_argument('--gammas', type=str, default='[0.2]')
     parser.add_argument('--Jzs', type=str, default='[3.5]')
-    parser.add_argument('--out', type=str, default='../test_0')
+    parser.add_argument('--out', type=str, default='data')
     parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
     index = args.index
