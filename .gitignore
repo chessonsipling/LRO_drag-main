@@ -1,4 +1,5 @@
 __pycache__/
+data/
 histograms/
 snapshots/
 histograms_window_finding/
