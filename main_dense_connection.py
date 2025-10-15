@@ -5,13 +5,15 @@ import numpy as np
 import torch
 from tqdm import tqdm, trange
 from scipy.optimize import fsolve
-from scipy.interpolate import interp1d, RegularGridInterpolator
+from scipy.interpolate import interp1d, RegularGridInterpolator, griddata
 from scipy.stats import linregress
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, BoundaryNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import plt_config
 import json
+import pandas as pd
 
 from cluster_finding_dense import find_cluster_dense_connection
 from avalanche_extraction import avalanche_extraction
@@ -80,7 +82,7 @@ class Model:
 
         self.name_str = f'{L}_{gamma:.3f}_{Jz:.3f}'
         self.data_dir = data_dir
-        self.snapshot_dir = 'snapshots'
+        self.snapshot_dir = 'figures'
         self.histogram_dir = 'histograms'
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.snapshot_dir, exist_ok=True)
@@ -159,11 +161,17 @@ class Model:
         histograms = np.empty(self.n_layers, dtype=object)
 
         spin_traj = torch.stack(spin_traj, dim=0)
+        use_optimal_window = False
         for layer_idx in range(self.n_layers):
             spin_traj_i = spin_traj[:, :, :, :, layer_idx]
             window_steps = coarse_grain_steps
             t_idx = (torch.arange(int(n_steps / window_steps)) * window_steps).to(torch.int64)
             flip_traj_i = spin_traj_i[t_idx].clone().diff(dim=0)
+
+            #Additional code to extract optimal time window from existing database, if no explicit window value is provided
+            if connection_dist is None:
+                connection_dist = find_optimal_window(layer_idx, self.gamma, self.Jz)
+                use_optimal_window = True
 
             '''#Avalanche extraction (from trajectories, with YH's original cluster-finding code)
             flip_traj_i = flip_traj_i.permute(1, 2, 3, 0).reshape(self.batch, self.L * self.L, -1)
@@ -192,6 +200,11 @@ class Model:
             avalanche_stats_all[layer_idx] = torch.tensor(avalanche_stats_i, dtype=torch.float32)
             t_windows_all[layer_idx] = coarse_grain_steps * connection_dist
             histograms[layer_idx] = histogram_i
+            with open(f'{self.data_dir}/{self.name_str}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_phase.json', 'w') as f:
+                json.dump(phase_i, f)
+            
+            if use_optimal_window:
+                connection_dist = None
 
         avalanche_stats_all = torch.cat([avalanche_stats_all, t_windows_all], dim=1)
 
@@ -218,6 +231,7 @@ class Model:
             print("Phase: no_dynamics")
             return [np.nan, np.nan, np.nan, np.nan, np.nan], None, "no_dynamics"
 
+        '''#Yuanhang's distribution binning approach
         log_cluster_sizes = cluster_sizes.log10()
 
         std = log_cluster_sizes.std()
@@ -241,16 +255,37 @@ class Model:
         p_hist = hist / hist.sum()
         p_hist = p_hist[hist > 0]
 
-
         bin_centers = bin_centers[hist > 0]
         hist = hist[hist > 0]
 
+        histogram = [bin_centers, p_hist]'''
+
+
+        #Chesson's distribution binning approach (identical to previous paper)
+        cluster_sizes = [int(element) for element in cluster_sizes.tolist()]
+        counts = np.zeros(max(cluster_sizes))
+        for i in range(len(cluster_sizes)):
+            counts[cluster_sizes[i] - 1] += 1 #offsets, since indexing starts at 0, but the first element in "counts" should correspond to the number of avalanches of size 1
+
+        #Choose a logarithmic binning approach which gives reasonable results (see manuscript for a discussion of this particular binning approach)
+        custom_bins = [i for i in range(0, 100, 2)] + [i for i in range(100, 1000, 20)] + [i for i in range(1000, 10000, 200)] + [i for i in range(10000, 100000, 2000)]
+        custom_bins = [my_bin for my_bin in custom_bins if my_bin <= max(cluster_sizes)] #truncates empty bins
+        
+        p_hist, bin_edges = np.histogram(cluster_sizes, bins=custom_bins, density=True)
+        bin_centers = np.array([(bin_edges[i] + bin_edges[i+1])/2 for i in range(len(bin_edges) - 1)])
+
+        bin_centers = torch.tensor(bin_centers)
+        p_hist = torch.tensor(p_hist)
+        
         histogram = [bin_centers, p_hist]
 
 
+        #Fits distribution to a power-law decay
         try:
-            slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy())
+            '''slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
+                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
+            slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
             n_bins = len(bin_centers)
             max_bin = bin_centers[-1].log10().cpu().numpy().item()
             max_dist = bin_centers.log10().diff().max().cpu().numpy().item()
@@ -260,11 +295,12 @@ class Model:
             max_bin = 0
             max_dist = 0
         
-        phase = None
-        has_LRO = (slope < -1.5) & (slope > -2.6) & (np.abs(r) > 0.95) & (max_bin > np.log10(L**2) - 0.5) & (max_dist < 0.5)
+        #Characterizes phase
+        phase = "outside_provided_phases"
+        has_LRO = (slope < -1.25) & (slope > -2.75) & (max_bin > np.log10(L**2) - 0.5) & (max_dist < 0.5)
         rigid = (max_bin > np.log10(L**2) - 0.5) & (max_dist > 1)
         LRO_to_rigid = (max_bin > np.log10(L**2) - 0.5) & (max_dist < 1) & (max_dist > 0.5)
-        LRO_to_SRO = (slope < -1.5) & (slope > -2.6) & (np.abs(r) > 0.95) & (max_bin < np.log10(L**2) - 0.5) \
+        LRO_to_SRO = (slope < -1.25) & (slope > -2.75) & (max_bin < np.log10(L**2) - 0.5) \
                     & (max_bin > np.log10(L**2) - 1.5)
         SRO = (max_bin < np.log10(L**2) - 1.5) & (max_bin > 0.1)
         no_dynamics = (max_bin < 0.1)
@@ -291,8 +327,10 @@ class Model:
         torch.save(histogram, f'{self.histogram_dir}/{name}.pt')
         try:
             # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
-            slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy())
+            '''slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
+                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
+            slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
         except:
             slope, intercept, r, p, se = [np.nan, np.nan, np.nan, np.nan, np.nan]
         bin_centers = bin_centers.cpu().numpy()
@@ -324,9 +362,11 @@ class Model:
             if layer_idx == len(histograms) - 1:
                 try:
                     # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
-                    slope, intercept, r, p, se = linregress(
+                    '''slope, intercept, r, p, se = linregress(
                         bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy())
+                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
+                    slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
                 except:
                     slope, intercept, r, p, se = [np.nan, np.nan, np.nan, np.nan, np.nan]
 
@@ -395,9 +435,11 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
             if L_i == len(all_histograms) - 1:
                 try:
                     # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
-                    slope, intercept, r, p, se = linregress(
+                    '''slope, intercept, r, p, se = linregress(
                         bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy())
+                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
+                    slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
                 except:
                     slope, intercept, r, p, se = [np.nan, np.nan, np.nan, np.nan, np.nan]
 
@@ -422,7 +464,10 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
 
         fig_finite, ax_finite = plt.subplots(figsize=(5, 4))
         for L_i, histogram_L in enumerate(all_histograms):
-            sc_finite = ax_finite.scatter(bin_centers/Ls[L_i], p_hist*(bin_centers**(-1*slope)), s=15, alpha=0.5)
+            bin_centers, p_hist = histogram_L[layer_idx]
+            bin_centers = bin_centers.cpu().numpy()
+            p_hist = p_hist.cpu().numpy()
+            sc_finite = ax_finite.scatter(bin_centers/(Ls[L_i]**2.0), p_hist*(bin_centers**(-1*slope)), s=15, alpha=0.5)
         ax_finite.set_xscale('log')
         ax_finite.set_yscale('log')
         ax_finite.set_xlabel(r'$s/L^2$')
@@ -433,22 +478,36 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
                     bbox_inches='tight', dpi=300)
         plt.close()
 
+def find_optimal_window(layer_idx, gamma, Jz):
+    f = f'optimal_time_windows/t_windows_layer{layer_idx}.xlsx'
+    df = pd.read_excel(f, sheet_name='Sheet1')
+    gamma_list = [df.columns[j+1] for j in range(len(df.columns)-1)]
+    gamma_list.insert(0, 0.0)
+    Jz_list = [element[0] for element in df.values]
+
+    proper_gamma = min(gamma_list, key=lambda x:abs(x-gamma))
+    proper_Jz = min(Jz_list, key=lambda x:abs(x-Jz))
+    proper_gamma_index = gamma_list.index(proper_gamma)
+    proper_Jz_index = Jz_list.index(proper_Jz)
+    connection_dist = df.values[proper_Jz_index][proper_gamma_index]
+    return connection_dist
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--index', type=int, default=0)
-    parser.add_argument('-b', '--batch', type=int, default=20)
+    parser.add_argument('-b', '--batch', type=int, default=1)
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
-    parser.add_argument('--n_layers', type=int, default=2, help='Number of layers in the model')
+    parser.add_argument('--n_layers', type=int, default=6, help='Number of layers in the model')
     parser.add_argument('--n_steps', type=int, default=200, help='Number of steps for the dynamics simulation')
     parser.add_argument('--transient_steps', type=int, default=2000, help='Number of transient steps before dynamics')
     parser.add_argument('--coarse_grain_steps', type=int, default=1, help='Number of steps for coarse graining')
-    parser.add_argument('--connection_dists', type=str, default='[95]', help='Connection distance for cluster finding')
-    parser.add_argument('--plot', type=bool, default=True, help='Whether to plot snapshots during simulation')
+    parser.add_argument('--connection_dists', type=str, default='[None]', help='Connection distance for cluster finding')
+    parser.add_argument('--plot', type=bool, default=False, help='Whether to plot snapshots during simulation')
     parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
-    parser.add_argument('--Ls', type=str, default='[32, 64, 128]')
-    parser.add_argument('--gammas', type=str, default='[0.2]')
-    parser.add_argument('--Jzs', type=str, default='[3.5]')
+    parser.add_argument('--Ls', type=str, default='[64]')
+    parser.add_argument('--gammas', type=str, default=f'{[element for element in np.logspace(-2, 1, num=12)]}')
+    parser.add_argument('--Jzs', type=str, default=f'{[round(element, 1) for element in np.linspace(1.5, 5.5, num=12)]}')
     parser.add_argument('--out', type=str, default='data')
     parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
@@ -493,3 +552,62 @@ if __name__ == '__main__':
                     all_histograms.append(histograms_L)
                 if plot:
                     plot_histogram_all_sizes(all_histograms, f'{Ls}_{gamma:.3f}_{Jz:.3f}_tw_{coarse_grain_steps}_{connection_dist}', Ls)
+
+#Loop for generating phase diagram
+    for L in Ls:
+        for layer_idx in range(n_layers):
+            phase_diagram_data = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
+            phase_diagram_colors = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
+            for J_index, Jz in enumerate(Jzs):
+                for g_index, gamma in enumerate(gammas):
+                    connection_dist = find_optimal_window(layer_idx, gamma, Jz)
+                    with open(f'data/{L}_{gamma:.3f}_{Jz:.3f}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_phase.json', 'r') as f:
+                        phase = json.load(f)
+                        phase_diagram_data[J_index][g_index] = phase
+                        if phase == "outside_provided_phases":
+                            color = 1
+                        elif phase == "has_LRO":
+                            color = 2
+                        elif phase == "rigid":
+                            color = 3
+                        elif phase == "LRO_to_rigid":
+                            color = 4
+                        elif phase == "LRO_to_SRO":
+                            color = 5
+                        elif phase == "SRO":
+                            color = 6
+                        elif phase == "no_dynamics":
+                            color = 7
+                        phase_diagram_colors[J_index][g_index] = color
+
+            phase_diagram_colors = np.array(phase_diagram_colors)
+            
+            colors = ['white', 'cyan', 'teal', 'dodgerblue', 'magenta', 'red', 'black']
+            cmap = ListedColormap(colors)
+            bounds = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
+            norm = BoundaryNorm(bounds, cmap.N)
+
+            #Interpolation
+            log_x_grid, y_grid = np.mgrid[np.log10(gammas[0]):np.log10(gammas[-1]):30j,
+                                          Jzs[0]:Jzs[-1]:30j]
+            log_x_grid = 10**log_x_grid
+            phase_diagram_colors = phase_diagram_colors.flatten()
+            xy_array = np.array([[x, y] for y in Jzs for x in gammas])
+            interpolated_phase_diagram_colors = griddata(xy_array, phase_diagram_colors, (log_x_grid, y_grid), method='nearest')
+
+            fig, ax = plt.subplots(figsize=(8, 8))
+
+            mesh = ax.pcolormesh(log_x_grid, y_grid, interpolated_phase_diagram_colors, cmap=cmap, norm=norm)
+
+            ax.set_xscale('log')
+            ax.set_xlim(left=gammas[0], right=gammas[-1])
+            ax.set_ylim(bottom=Jzs[0], top=Jzs[-1])
+            ax.set_xlabel(r'$\gamma$', fontsize=32)
+            ax.set_ylabel(r'$J^{\perp}$', fontsize=32)
+            ax.tick_params(labelsize=22) 
+            ax.set_title(f'Layer {layer_idx}', fontsize=28)
+
+            plt.savefig(f'figures/{L}_{coarse_grain_steps}_{layer_idx}_phase_diagram.png', dpi=300, bbox_inches='tight')
+            plt.close()
+
+#If there's time in the future, improve plot error handling beyond temporary fix (when avalanche data is insufficient)

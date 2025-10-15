@@ -94,7 +94,7 @@ def avalanche_extraction(data, time_window, dt):
             indices_to_remove = []
             for l in range(len(avalanche[2])):
                 #Updates the list of indices corresponding to spins in each avalanche which haven't had any neighbor flips in a sufficiently long time, such that these spins are now considered "inactive"
-                if avalanche[2][l] >= time_window:
+                if avalanche[2][l] >= int(time_window/dt):
                     indices_to_remove.append(l)
                 else:
                     avalanche[2][l] += 1

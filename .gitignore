@@ -1,6 +1,16 @@
 __pycache__/
+optimal_time_windows/
 data/
+figures/
 histograms/
-snapshots/
 histograms_window_finding/
 histograms_finite_size_testing/
+data_T_200/
+figures_T_200/
+histograms_T_200/
+data_T_400/
+figures_T_400/
+histograms_T_400/
+data_reintroduce_dt/
+figures_reintroduce_dt/
+histograms_reintroduce_dt/
