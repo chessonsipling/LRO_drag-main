@@ -28,7 +28,7 @@ color = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
 class Model:
     def __init__(self, batch, L, n_layers=11, Jz=1, gamma=0.2, g=2, delta=0.75, dt=0.05, init_scale=1,
-                 J=None, Jz_std=0, repeat_idx=0, save=True, data_dir='data'):
+                 J=None, Jz_std=0, repeat_idx=0, save=True, data_dir='data_phase_diagram_5'):
         self.batch = batch
         self.L = L
         self.n_layers = n_layers
@@ -82,8 +82,8 @@ class Model:
 
         self.name_str = f'{L}_{gamma:.3f}_{Jz:.3f}'
         self.data_dir = data_dir
-        self.snapshot_dir = 'figures'
-        self.histogram_dir = 'histograms'
+        self.snapshot_dir = 'figures_phase_diagram_5'
+        self.histogram_dir = 'histograms_phase_diagram_5'
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.snapshot_dir, exist_ok=True)
         os.makedirs(self.histogram_dir, exist_ok=True)
@@ -466,9 +466,9 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
         ax.set_xlabel('Avalanche Size s')
         ax.set_ylabel('Probability P(s)')
         # ax.set_title(f'{self.name_str} {slope:.2f}')
-        plt.savefig(f'histograms/{name}_layer{layer_idx}.png',
+        plt.savefig(f'histograms_phase_diagram_5/{name}_layer{layer_idx}.png',
                     bbox_inches='tight', dpi=300)
-        plt.savefig(f'histograms/{name}_layer{layer_idx}.svg',
+        plt.savefig(f'histograms_phase_diagram_5/{name}_layer{layer_idx}.svg',
                     bbox_inches='tight', dpi=300)
         plt.close()
 
@@ -486,9 +486,9 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
             ax_finite.set_yscale('log')
             ax_finite.set_xlabel(r'$s/L^2$')
             ax_finite.set_ylabel(rf'$s^{{{-1*slope:.2f}}} P(s)$')
-            plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.png',
+            plt.savefig(f'histograms_phase_diagram_5/{name}_layer{layer_idx}_finite.png',
                         bbox_inches='tight', dpi=300)
-            plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.svg',
+            plt.savefig(f'histograms_phase_diagram_5/{name}_layer{layer_idx}_finite.svg',
                         bbox_inches='tight', dpi=300)
             plt.close()
 
@@ -512,7 +512,7 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--index', type=int, default=0)
     parser.add_argument('-b', '--batch', type=int, default=5)
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
-    parser.add_argument('--n_layers', type=int, default=11, help='Number of layers in the model')
+    parser.add_argument('--n_layers', type=int, default=6, help='Number of layers in the model')
     parser.add_argument('--n_steps', type=int, default=200, help='Number of steps for the dynamics simulation')
     parser.add_argument('--transient_steps', type=int, default=2000, help='Number of transient steps before dynamics')
     parser.add_argument('--coarse_grain_steps', type=int, default=1, help='Number of steps for coarse graining')
@@ -522,7 +522,7 @@ if __name__ == '__main__':
     parser.add_argument('--Ls', type=str, default='[64]')
     parser.add_argument('--gammas', type=str, default=f'{[element for element in np.logspace(-2, 1, num=12)]}')
     parser.add_argument('--Jzs', type=str, default=f'{[round(element, 1) for element in np.linspace(1.5, 5.5, num=12)]}')
-    parser.add_argument('--out', type=str, default='data')
+    parser.add_argument('--out', type=str, default='data_phase_diagram_5')
     parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
     index = args.index
@@ -576,7 +576,7 @@ if __name__ == '__main__':
             for J_index, Jz in enumerate(Jzs):
                 for g_index, gamma in enumerate(gammas):
                     connection_dist = find_optimal_window(layer_idx, gamma, Jz)
-                    with open(f'data/{L}_{gamma:.3f}_{Jz:.3f}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_phase.json', 'r') as f:
+                    with open(f'data_phase_diagram_5/{L}_{gamma:.3f}_{Jz:.3f}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_phase.json', 'r') as f:
                         phase = json.load(f)
                         phase_diagram_data[J_index][g_index] = phase
                         if phase == "outside_provided_phases":
@@ -622,5 +622,5 @@ if __name__ == '__main__':
             ax.tick_params(labelsize=22) 
             ax.set_title(f'Layer {layer_idx}', fontsize=28)
 
-            plt.savefig(f'figures/{L}_{coarse_grain_steps}_{layer_idx}.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'figures_phase_diagram_5/{L}_{coarse_grain_steps}_{layer_idx}.png', dpi=300, bbox_inches='tight')
             plt.close()
