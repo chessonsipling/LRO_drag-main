@@ -209,10 +209,11 @@ class Model:
         avalanche_stats_all = torch.cat([avalanche_stats_all, t_windows_all], dim=1)
 
         if plot:
-            self.plot_histogram_all_layers(histograms, f'{self.name_str}_{coarse_grain_steps}_{connection_dist}_all')
+            if any([len(element[0]) > 0 for element in histograms]):
+                self.plot_histogram_all_layers(histograms, f'{self.name_str}_{coarse_grain_steps}_{connection_dist}_all')
             for layer_idx in range(self.n_layers):
                 histogram = histograms[layer_idx]
-                if histogram is not None:
+                if len(histogram[0]) > 0:
                     self.plot_histogram(histogram, f'{self.name_str}_'
                                                    f'tw_{coarse_grain_steps}_{connection_dist}_'
                                                    f'layer{layer_idx}')
@@ -229,7 +230,7 @@ class Model:
 
         if len(cluster_sizes) <= 2:
             print("Phase: no_dynamics")
-            return [np.nan, np.nan, np.nan, np.nan, np.nan], None, "no_dynamics"
+            return [np.nan, np.nan, np.nan, np.nan, np.nan], [torch.tensor([], dtype=torch.float64), torch.tensor([], dtype=torch.float64)], "no_dynamics"
 
         '''#Yuanhang's distribution binning approach
         log_cluster_sizes = cluster_sizes.log10()
@@ -276,6 +277,10 @@ class Model:
 
         bin_centers = torch.tensor(bin_centers)
         p_hist = torch.tensor(p_hist)
+
+        if len(bin_centers) == 0:
+            print("Phase: no_dynamics")
+            return [np.nan, np.nan, np.nan, np.nan, np.nan], [torch.tensor([], dtype=torch.float64), torch.tensor([], dtype=torch.float64)], "no_dynamics"
         
         histogram = [bin_centers, p_hist]
 
@@ -392,13 +397,14 @@ class Model:
         plt.savefig(f'{self.histogram_dir}/{name}.svg',
                     bbox_inches='tight', dpi=300)
 
-        ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', label=rf'$\sim s^{{{slope:.2f}}}$')
-        print(f'Fitted slope: {slope:.4f}, intercept: {intercept:.4f}')
-        ax.legend()
-        plt.savefig(f'{self.histogram_dir}/{name}_with_fit.png',
-                    bbox_inches='tight', dpi=300)
-        plt.savefig(f'{self.histogram_dir}/{name}_with_fit.svg',
-                    bbox_inches='tight', dpi=300)
+        if not np.isnan(slope):
+            ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', label=rf'$\sim s^{{{slope:.2f}}}$')
+            print(f'Fitted slope: {slope:.4f}, intercept: {intercept:.4f}')
+            ax.legend()
+            plt.savefig(f'{self.histogram_dir}/{name}_with_fit.png',
+                        bbox_inches='tight', dpi=300)
+            plt.savefig(f'{self.histogram_dir}/{name}_with_fit.svg',
+                        bbox_inches='tight', dpi=300)
         plt.close()
 
     def plot_snapshot(self, s, iteration):
@@ -445,16 +451,20 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
 
             bin_centers = bin_centers.cpu().numpy()
             p_hist = p_hist.cpu().numpy()
-            sc = ax.scatter(bin_centers, p_hist, s=15, alpha=0.5, label=rf'$N = {{{Ls[L_i]}}}^2$')
+            if len(histogram_L[layer_idx][0]) == 0:
+                pass
+            else:
+                sc = ax.scatter(bin_centers, p_hist, s=15, alpha=0.5, label=rf'$N = {{{Ls[L_i]}}}^2$')
 
-        ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', alpha=0.5, label=rf'$\sim s^{{{slope:.2f}}}$')
+        if not np.isnan(slope):
+            ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', alpha=0.5, label=rf'$\sim s^{{{slope:.2f}}}$')
+            ax.legend(fontsize=16)
         ax.set_xscale('log')
         ax.set_yscale('log')
         # ax.set_xlim(0.7, 4000)
         # ax.set_ylim(2e-8, 1.5)
         ax.set_xlabel('Avalanche Size s')
         ax.set_ylabel('Probability P(s)')
-        ax.legend(fontsize=16)
         # ax.set_title(f'{self.name_str} {slope:.2f}')
         plt.savefig(f'histograms/{name}_layer{layer_idx}.png',
                     bbox_inches='tight', dpi=300)
@@ -462,21 +472,25 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
                     bbox_inches='tight', dpi=300)
         plt.close()
 
-        fig_finite, ax_finite = plt.subplots(figsize=(5, 4))
-        for L_i, histogram_L in enumerate(all_histograms):
-            bin_centers, p_hist = histogram_L[layer_idx]
-            bin_centers = bin_centers.cpu().numpy()
-            p_hist = p_hist.cpu().numpy()
-            sc_finite = ax_finite.scatter(bin_centers/(Ls[L_i]**2.0), p_hist*(bin_centers**(-1*slope)), s=15, alpha=0.5)
-        ax_finite.set_xscale('log')
-        ax_finite.set_yscale('log')
-        ax_finite.set_xlabel(r'$s/L^2$')
-        ax_finite.set_ylabel(rf'$s^{{{-1*slope:.2f}}} P(s)$')
-        plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.png',
-                    bbox_inches='tight', dpi=300)
-        plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.svg',
-                    bbox_inches='tight', dpi=300)
-        plt.close()
+        if not np.isnan(slope):
+            fig_finite, ax_finite = plt.subplots(figsize=(5, 4))
+            for L_i, histogram_L in enumerate(all_histograms):
+                bin_centers, p_hist = histogram_L[layer_idx]
+                bin_centers = bin_centers.cpu().numpy()
+                p_hist = p_hist.cpu().numpy()
+                if len(histogram_L[layer_idx][0]) == 0:
+                    pass
+                else:
+                    sc_finite = ax_finite.scatter(bin_centers/(Ls[L_i]**2.0), p_hist*(bin_centers**(-1*slope)), s=15, alpha=0.5)
+            ax_finite.set_xscale('log')
+            ax_finite.set_yscale('log')
+            ax_finite.set_xlabel(r'$s/L^2$')
+            ax_finite.set_ylabel(rf'$s^{{{-1*slope:.2f}}} P(s)$')
+            plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.png',
+                        bbox_inches='tight', dpi=300)
+            plt.savefig(f'histograms/{name}_layer{layer_idx}_finite.svg',
+                        bbox_inches='tight', dpi=300)
+            plt.close()
 
 def find_optimal_window(layer_idx, gamma, Jz):
     f = f'optimal_time_windows/t_windows_layer{layer_idx}.xlsx'
@@ -496,14 +510,14 @@ def find_optimal_window(layer_idx, gamma, Jz):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--index', type=int, default=0)
-    parser.add_argument('-b', '--batch', type=int, default=1)
+    parser.add_argument('-b', '--batch', type=int, default=5)
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
-    parser.add_argument('--n_layers', type=int, default=6, help='Number of layers in the model')
+    parser.add_argument('--n_layers', type=int, default=11, help='Number of layers in the model')
     parser.add_argument('--n_steps', type=int, default=200, help='Number of steps for the dynamics simulation')
     parser.add_argument('--transient_steps', type=int, default=2000, help='Number of transient steps before dynamics')
     parser.add_argument('--coarse_grain_steps', type=int, default=1, help='Number of steps for coarse graining')
     parser.add_argument('--connection_dists', type=str, default='[None]', help='Connection distance for cluster finding')
-    parser.add_argument('--plot', type=bool, default=False, help='Whether to plot snapshots during simulation')
+    parser.add_argument('--plot', type=bool, default=True, help='Whether to plot snapshots during simulation')
     parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
     parser.add_argument('--Ls', type=str, default='[64]')
     parser.add_argument('--gammas', type=str, default=f'{[element for element in np.logspace(-2, 1, num=12)]}')
@@ -551,7 +565,8 @@ if __name__ == '__main__':
                                 coarse_grain_steps=coarse_grain_steps, connection_dist=connection_dist)
                     all_histograms.append(histograms_L)
                 if plot:
-                    plot_histogram_all_sizes(all_histograms, f'{Ls}_{gamma:.3f}_{Jz:.3f}_tw_{coarse_grain_steps}_{connection_dist}', Ls)
+                    if any([len(element[0]) > 0 for element in all_histograms]):
+                        plot_histogram_all_sizes(all_histograms, f'{Ls}_{gamma:.3f}_{Jz:.3f}_tw_{coarse_grain_steps}_{connection_dist}', Ls)
 
 #Loop for generating phase diagram
     for L in Ls:
@@ -607,7 +622,5 @@ if __name__ == '__main__':
             ax.tick_params(labelsize=22) 
             ax.set_title(f'Layer {layer_idx}', fontsize=28)
 
-            plt.savefig(f'figures/{L}_{coarse_grain_steps}_{layer_idx}_phase_diagram.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'figures/{L}_{coarse_grain_steps}_{layer_idx}.png', dpi=300, bbox_inches='tight')
             plt.close()
-
-#If there's time in the future, improve plot error handling beyond temporary fix (when avalanche data is insufficient)
