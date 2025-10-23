@@ -6,6 +6,7 @@ import torch
 from tqdm import tqdm, trange
 from scipy.optimize import fsolve
 from scipy.interpolate import interp1d, RegularGridInterpolator, griddata
+from scipy.ndimage import generic_filter
 from scipy.stats import linregress
 import matplotlib
 import matplotlib.pyplot as plt
@@ -17,6 +18,7 @@ import pandas as pd
 
 from cluster_finding_dense import find_cluster_dense_connection
 from avalanche_extraction import avalanche_extraction
+from cluster_finding import *
 
 matplotlib.use('Agg')
 color = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -164,7 +166,7 @@ class Model:
         use_optimal_window = False
         for layer_idx in range(self.n_layers):
             spin_traj_i = spin_traj[:, :, :, :, layer_idx]
-            window_steps = coarse_grain_steps
+            window_steps = coarse_grain_steps #connection_dist (if using YH's updated cluster-finding code)
             t_idx = (torch.arange(int(n_steps / window_steps)) * window_steps).to(torch.int64)
             flip_traj_i = spin_traj_i[t_idx].clone().diff(dim=0)
 
@@ -173,10 +175,22 @@ class Model:
                 connection_dist = find_optimal_window(layer_idx, self.gamma, self.Jz)
                 use_optimal_window = True
 
+
             '''#Avalanche extraction (from trajectories, with YH's original cluster-finding code)
             flip_traj_i = flip_traj_i.permute(1, 2, 3, 0).reshape(self.batch, self.L * self.L, -1)
-            _, clusters, _, Rs, _, is_percolating = \
-                find_cluster_dense_connection(flip_traj_i, self.edges, self.coordinate, connection_dist)'''
+            temp_clusters = [] #temporary fix, to circumvent CUDA memory limits
+            for j in range(batch):
+                _, temp_clusters_j, _, _, _, is_percolating = \
+                    find_cluster_dense_connection(torch.unsqueeze(flip_traj_i[j], 0), self.edges, self.coordinate, connection_dist)
+                with open(f'{self.data_dir}/{self.name_str}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_clusters_sizes_{j}.json', 'w') as f:
+                    json.dump([element.item() for element in temp_clusters_j], f)
+                temp_clusters.append(temp_clusters_j)
+            clusters = [item for sublist in temp_clusters for item in sublist]'''
+
+            '''#Avalanche extraction (from trajectories, with YH's updated cluster-finding code)
+            flip_traj_i = flip_traj_i.permute(1, 2, 3, 0).reshape(self.batch, self.L * self.L, -1)
+            _, clusters, _, _, _, is_percolating = \
+                    find_cluster_GPU(flip_traj_i, self.edges, self.coordinate)'''
 
             #Avalanche extraction (from trajectories, with Chesson's code)
             flip_traj_i = flip_traj_i.permute(1, 0, 2, 3)
@@ -195,6 +209,7 @@ class Model:
                     temp_clusters_j = json.load(f)
                 temp_clusters.append(temp_clusters_j)
             clusters = [item for sublist in temp_clusters for item in sublist]'''
+
 
             avalanche_stats_i, histogram_i, phase_i = self.avalanche_stats(torch.tensor(clusters))
             avalanche_stats_all[layer_idx] = torch.tensor(avalanche_stats_i, dtype=torch.float32)
@@ -232,7 +247,7 @@ class Model:
             print("Phase: no_dynamics")
             return [np.nan, np.nan, np.nan, np.nan, np.nan], [torch.tensor([], dtype=torch.float64), torch.tensor([], dtype=torch.float64)], "no_dynamics"
 
-        '''#Yuanhang's distribution binning approach
+        #Yuanhang's distribution binning approach
         log_cluster_sizes = cluster_sizes.log10()
 
         std = log_cluster_sizes.std()
@@ -259,10 +274,10 @@ class Model:
         bin_centers = bin_centers[hist > 0]
         hist = hist[hist > 0]
 
-        histogram = [bin_centers, p_hist]'''
+        histogram = [bin_centers, p_hist]
 
 
-        #Chesson's distribution binning approach (identical to previous paper)
+        '''#Chesson's distribution binning approach (identical to previous paper)
         cluster_sizes = [int(element) for element in cluster_sizes.tolist()]
         counts = np.zeros(max(cluster_sizes))
         for i in range(len(cluster_sizes)):
@@ -282,15 +297,15 @@ class Model:
             print("Phase: no_dynamics")
             return [np.nan, np.nan, np.nan, np.nan, np.nan], [torch.tensor([], dtype=torch.float64), torch.tensor([], dtype=torch.float64)], "no_dynamics"
         
-        histogram = [bin_centers, p_hist]
+        histogram = [bin_centers, p_hist]'''
 
 
         #Fits distribution to a power-law decay
         try:
-            '''slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
-            slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
-                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
+            slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
+                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit
+            '''slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit'''
             n_bins = len(bin_centers)
             max_bin = bin_centers[-1].log10().cpu().numpy().item()
             max_dist = bin_centers.log10().diff().max().cpu().numpy().item()
@@ -302,11 +317,10 @@ class Model:
         
         #Characterizes phase
         phase = "outside_provided_phases"
-        has_LRO = (slope >= -2.5) & (max_bin > np.log10(L**2) - 1.5) & (max_dist <= 1)
+        has_LRO = (slope >= -2.5) & (max_bin > np.log10(L**2) - 1.0) & (max_dist <= 1)
         rigid = (max_bin > np.log10(L**2) - 1.5) & (max_dist > 1)
         #LRO_to_rigid = (max_bin > np.log10(L**2) - 0.5) & (max_dist < 1) & (max_dist > 0.5)
-        #LRO_to_SRO = (slope < -1.25) & (slope > -2.75) & (max_bin < np.log10(L**2) - 0.5) \
-        #            & (max_bin > np.log10(L**2) - 1.5)
+        LRO_to_SRO = (slope >= -2.5) & (max_bin <= np.log10(L**2) - 1.0) & (max_bin > np.log10(L**2) - 1.5)
         SRO = (max_bin <= np.log10(L**2) - 1.5) & (max_bin > 0.5)
         no_dynamics = (max_bin <= 0.5)
         if has_LRO:
@@ -332,10 +346,10 @@ class Model:
         #torch.save(histogram, f'{self.histogram_dir}/{name}.pt')
         try:
             # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
-            '''slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
-            slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
-                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
+            slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
+                                                    p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit
+            '''slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit'''
         except:
             slope, intercept, r, p, se = [np.nan, np.nan, np.nan, np.nan, np.nan]
         bin_centers = bin_centers.cpu().numpy()
@@ -367,11 +381,10 @@ class Model:
             if layer_idx == len(histograms) - 1:
                 try:
                     # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
-                    '''slope, intercept, r, p, se = linregress(
-                        bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
-                    slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
-                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
+                    slope, intercept, r, p, se = linregress(bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
+                                                            p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit
+                    '''slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit'''
                 except:
                     slope, intercept, r, p, se = [np.nan, np.nan, np.nan, np.nan, np.nan]
 
@@ -441,11 +454,11 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
             if L_i == len(all_histograms) - 1:
                 try:
                     # fit = np.polyfit(np.log(bin_centers[fit_mask]), np.log(hist[fit_mask]), 1)
-                    '''slope, intercept, r, p, se = linregress(
+                    slope, intercept, r, p, se = linregress(
                         bin_centers[:int(0.6 * len(bin_centers))].log10().cpu().numpy(),
-                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit'''
-                    slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
-                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit
+                        p_hist[:int(0.6 * len(bin_centers))].log10().cpu().numpy()) #YH's fit
+                    '''slope, intercept, r, p, se = linregress(bin_centers[p_hist > 0.0][1:75].log10().cpu().numpy(),
+                                                    p_hist[p_hist > 0.0][1:75].log10().cpu().numpy()) #Chesson's fit'''
                 except:
                     slope, intercept, r, p, se = [np.nan, np.nan, np.nan, np.nan, np.nan]
 
@@ -458,7 +471,7 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
 
         if not np.isnan(slope):
             ax.plot(bin_centers, 10 ** (slope * np.log10(bin_centers) + intercept), '--', color='black', alpha=0.5, label=rf'$\sim s^{{{slope:.2f}}}$')
-            ax.legend(fontsize=16)
+            ax.legend(fontsize=14, loc='lower left')
         ax.set_xscale('log')
         ax.set_yscale('log')
         # ax.set_xlim(0.7, 4000)
@@ -481,7 +494,7 @@ def plot_histogram_all_sizes(all_histograms, name, Ls):
                 if len(histogram_L[layer_idx][0]) == 0:
                     pass
                 else:
-                    sc_finite = ax_finite.scatter(bin_centers/(Ls[L_i]**2.0), p_hist*(bin_centers**(-1*slope)), s=15, alpha=0.5)
+                    sc_finite = ax_finite.scatter(bin_centers[7:]/(Ls[L_i]**2.0), p_hist[7:]*(bin_centers[7:]**(-1*slope)), s=15, alpha=0.5)
             ax_finite.set_xscale('log')
             ax_finite.set_yscale('log')
             ax_finite.set_xlabel(r'$s/L^2$')
@@ -506,6 +519,11 @@ def find_optimal_window(layer_idx, gamma, Jz):
     connection_dist = df.values[proper_Jz_index][proper_gamma_index]
     return connection_dist
 
+def majority_vote_filter(values):
+    # Convert values to integers if needed
+    vals, counts = np.unique(values, return_counts=True)
+    return vals[np.argmax(counts)]
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -521,7 +539,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
     parser.add_argument('--Ls', type=str, default='[64]')
     parser.add_argument('--gammas', type=str, default=f'{[element for element in np.logspace(-2, 1, num=24)]}')
-    parser.add_argument('--Jzs', type=str, default=f'{[round(element, 1) for element in np.linspace(1.5, 5.5, num=24)]}')
+    parser.add_argument('--Jzs', type=str, default=f'{[element for element in np.linspace(1.5, 5.5, num=24)]}')
     parser.add_argument('--out', type=str, default='data_phase_diagram_25')
     parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
@@ -570,7 +588,7 @@ if __name__ == '__main__':
 
 #Loop for generating phase diagram
     for L in Ls:
-        for layer_idx in range(2):#n_layers):
+        for layer_idx in range(n_layers):
             phase_diagram_data = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
             phase_diagram_colors = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
             for J_index, Jz in enumerate(Jzs):
@@ -597,7 +615,7 @@ if __name__ == '__main__':
 
             phase_diagram_colors = np.array(phase_diagram_colors)
             
-            colors = ['royalblue', 'dodgerblue', 'deepskyblue', 'coral', 'orangered', 'black', 'white']
+            colors = ['darkblue', 'blue', 'dodgerblue', 'lightskyblue', 'orangered', 'black', 'white']
             cmap = ListedColormap(colors)
             bounds = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
             norm = BoundaryNorm(bounds, cmap.N)
@@ -608,7 +626,8 @@ if __name__ == '__main__':
             log_x_grid = 10**log_x_grid
             phase_diagram_colors = phase_diagram_colors.flatten()
             xy_array = np.array([[x, y] for y in Jzs for x in gammas])
-            interpolated_phase_diagram_colors = griddata(xy_array, phase_diagram_colors, (log_x_grid, y_grid), method='linear')
+            interpolated_phase_diagram_colors = griddata(xy_array, phase_diagram_colors, (log_x_grid, y_grid), method='nearest')
+            interpolated_phase_diagram_colors = generic_filter(interpolated_phase_diagram_colors, majority_vote_filter, size=35)
 
             fig, ax = plt.subplots(figsize=(8, 8))
 
