@@ -4,9 +4,9 @@ This repository includes all the necessary code to reproduce the results of [Zha
 2. Visualizes some of the paper's key results (intra-layer avalanche distributions and phase diagrams).
 
 ## *main_dense_connection.py*
-After downloading all *.py files in this repo, main_dense_connection.py is ready to be run from the primary directory. Be default, this will create new subdirectories "data/", "figures/", and "histograms/" in which layered spin lattice systems are simulated, avalanche distributions are extracted/plotted, and the phase structure in parameter space is visualized.
+After downloading all *.py files in this repo, main_dense_connection.py is ready to be run from the primary directory. By default, this will create new subdirectories "data/", "figures/", and "histograms/" in which layered spin lattice systems are simulated, avalanche distributions are extracted/plotted, and the phase structure in parameter space is visualized.
 
-All free parameters for simulation/visualization can be added as arguments when running main_dense_connection.py. See parameter_notes.txt for a description of each potential argument.
+All free parameters for simulation/visualization can be added as arguments when running main_dense_connection.py.
 
 ## Contact
 
