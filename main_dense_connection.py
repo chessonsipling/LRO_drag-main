@@ -37,6 +37,7 @@ class Model:
         self.Jz_std = Jz_std
         self.g = g
         self.gamma = gamma
+        self.gamma_hetero = torch.clamp(torch.normal(self.gamma, 0.4*self.gamma, size=(n_layers, batch, L, L)), min=1e-3)
         self.delta = delta
         self.dt = dt
         self.init_scale = init_scale
@@ -83,8 +84,8 @@ class Model:
 
         self.name_str = f'{L}_{gamma:.3f}_{Jz:.3f}'
         self.data_dir = data_dir
-        self.snapshot_dir = 'figures'
-        self.histogram_dir = 'histograms'
+        self.snapshot_dir = 'figures_hetero_gamma'
+        self.histogram_dir = 'histograms_hetero_gamma'
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.snapshot_dir, exist_ok=True)
         os.makedirs(self.histogram_dir, exist_ok=True)
@@ -99,7 +100,10 @@ class Model:
         Jss = torch.stack([Jp[0, :, :, :, 0] * sp[:, :, :, 0] * sp[:, :, :, 0].roll(1, 1),
                            Jp[1, :, :, :, 0] * sp[:, :, :, 0] * sp[:, :, :, 0].roll(1, 2)], dim=0)
         C = (Jss[:, :, :-1, :-1] + 1) / 2
-        dx = self.gamma * (C - self.delta)
+        #Constant gamma
+        #dx = self.gamma * (C - self.delta)
+        #Heterogenous gamma
+        dx = self.gamma_hetero * (C - self.delta)
 
         # (batch, L+1, L+1, L+1)
         ds = Jp[0] * sp.roll(1, 1) + Jp[0].roll(-1, 1) * sp.roll(-1, 1) \
@@ -490,9 +494,9 @@ def majority_vote_filter(values):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--index', type=int, default=0, help='Integer to characterize unique experiments')
-    parser.add_argument('-b', '--batch', type=int, default=25, help='Instances simulated in a batch')
+    parser.add_argument('-b', '--batch', type=int, default=1000, help='Instances simulated in a batch')
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
-    parser.add_argument('--n_layers', type=int, default=11, help='Number of layers in the model')
+    parser.add_argument('--n_layers', type=int, default=2, help='Number of layers in the model')
     parser.add_argument('--n_steps', type=int, default=200, help='Number of steps for the dynamics simulation')
     parser.add_argument('--transient_steps', type=int, default=2000, help='Number of transient steps before dynamics')
     parser.add_argument('--coarse_grain_steps', type=int, default=1, help='Number of steps for coarse graining')
@@ -500,8 +504,8 @@ if __name__ == '__main__':
     parser.add_argument('--plot', type=bool, default=True, help='Whether to plot snapshots during simulation')
     parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
     parser.add_argument('--Ls', type=str, default='[64]', help='List of lattice lengths')
-    parser.add_argument('--gammas', type=str, default=f'{[element for element in np.logspace(-2, 1, num=24)]}', help='List of gamma values')
-    parser.add_argument('--Jzs', type=str, default=f'{[element for element in np.linspace(1.5, 5.5, num=24)]}', help='List of Jz values')
+    parser.add_argument('--gammas', type=str, default=f'{[0.05]}', help='List of gamma_avg values (where gammas are now randomly drawn from a Gaussian centered at gamma_avg)')
+    parser.add_argument('--Jzs', type=str, default=f'{[3.0]}', help='List of Jz values')
     parser.add_argument('--out', type=str, default='data', help='Output data directory name')
     parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
@@ -549,7 +553,7 @@ if __name__ == '__main__':
                         plot_histogram_all_sizes(all_histograms, f'{Ls}_{gamma:.3f}_{Jz:.3f}_tw_{coarse_grain_steps}_{connection_dist}', Ls)
 
 #Loop for generating phase diagram
-    for L in Ls:
+    '''for L in Ls:
         for layer_idx in range(n_layers):
             phase_diagram_data = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
             phase_diagram_colors = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
@@ -604,4 +608,4 @@ if __name__ == '__main__':
             ax.set_title(f'Layer {layer_idx}', fontsize=28)
 
             plt.savefig(f'figures/{L}_{coarse_grain_steps}_{layer_idx}_phase_diagram.png', dpi=300, bbox_inches='tight')
-            plt.close()
+            plt.close()'''
