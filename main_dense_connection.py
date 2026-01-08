@@ -15,6 +15,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import plt_config
 import json
 import pandas as pd
+import random
 
 from avalanche_extraction import avalanche_extraction
 from cluster_finding import *
@@ -83,8 +84,8 @@ class Model:
 
         self.name_str = f'{L}_{gamma:.3f}_{Jz:.3f}'
         self.data_dir = data_dir
-        self.snapshot_dir = 'figures'
-        self.histogram_dir = 'histograms'
+        self.snapshot_dir = 'figures_time_lapsed_correlation'
+        self.histogram_dir = 'histograms_time_lapsed_correlation'
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.snapshot_dir, exist_ok=True)
         os.makedirs(self.histogram_dir, exist_ok=True)
@@ -146,6 +147,7 @@ class Model:
         plot_steps = 10000
 
         spin_traj = []
+        full_spin_traj = []
 
         for i in trange(n_steps):
             if plot:
@@ -155,6 +157,7 @@ class Model:
                     self.plot_snapshot(self.s[0], i // plot_steps)
             self.s, self.x = compiled_step(self.s, self.x)
             spin_traj.append(self.s > 0)
+            full_spin_traj.append(self.s)
 
         avalanche_stats_all = torch.zeros(self.n_layers, 5)
         metrics = torch.zeros(self.n_layers, 1)
@@ -162,6 +165,7 @@ class Model:
         histograms = np.empty(self.n_layers, dtype=object)
 
         spin_traj = torch.stack(spin_traj, dim=0)
+        full_spin_traj = torch.stack(full_spin_traj, dim=0)
         use_optimal_window = False
         for layer_idx in range(self.n_layers):
             spin_traj_i = spin_traj[:, :, :, :, layer_idx]
@@ -214,6 +218,8 @@ class Model:
         if plot:
             if any([len(element[0]) > 0 for element in histograms]):
                 self.plot_histogram_all_layers(histograms, f'{self.name_str}_{coarse_grain_steps}_{connection_dist}_all')
+            self.plot_correlation_overlap(full_spin_traj, f'{self.name_str}')
+            self.plot_spin_trajs(full_spin_traj, f'{self.name_str}')
             for layer_idx in range(self.n_layers):
                 histogram = histograms[layer_idx]
                 if len(histogram[0]) > 0:
@@ -388,6 +394,44 @@ class Model:
             plt.savefig(f'{self.histogram_dir}/{name}_with_fit.svg',
                         bbox_inches='tight', dpi=300)
         plt.close()
+    
+    def plot_correlation_overlap(self, full_spin_trajs, name):
+        full_spin_trajs = full_spin_trajs.cpu().numpy()
+        J_z = torch.sign(self.J[2, :, :, :, 0]).cpu().numpy() #only considers first instance in batch
+        fig, ax = plt.subplots(figsize=(5, 4))
+        tau = np.arange(100)
+        #t = np.arange(100)
+        layer_0_spins = full_spin_trajs[:, :, :, :, 0] #only considers first instance in batch
+        layer_1_spins = full_spin_trajs[:, :, :, :, 1] #only considers first instance in batch
+        correlations = [np.mean([np.mean([np.mean(J_z[b]*layer_0_spins[t_idv][b]*layer_1_spins[t_idv+tau_idv][b]) for t_idv in range(100)]) for b in range(batch)]) for tau_idv in tau]
+        ax.plot(tau, correlations)
+        ax.set_xlabel(r'Time Delay $\tau$')
+        ax.set_ylabel(r'$\tilde{G}(\tau)$')
+        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}.png',
+                    bbox_inches='tight', dpi=300)
+        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}.svg',
+                    bbox_inches='tight', dpi=300)
+        plt.close()
+    
+    def plot_spin_trajs(self, full_spin_trajs, name):
+        full_spin_trajs = full_spin_trajs.cpu().numpy()
+        fig, ax = plt.subplots(figsize=(5, 4))
+        t = np.arange(200)
+        colors = ['red', 'orange', 'green', 'blue', 'purple']
+        for i in range(5):
+            color = colors[i]
+            x = random.randint(0, 63)
+            y = random.randint(0, 63)
+            ax.plot(t, full_spin_trajs[:, 0, x, y, 0], color=color) #only considers first instance in batch
+            ax.plot(t, full_spin_trajs[:, 0, x, y, 1], color=color, linestyle='dashed') #only considers first instance in batch
+        ax.set_xlabel(r'Time $t$')
+        ax.set_ylabel(r'Spin $s$')
+        plt.savefig(f'{self.histogram_dir}/spin_trajs_{name}.png',
+                    bbox_inches='tight', dpi=300)
+        plt.savefig(f'{self.histogram_dir}/spin_trajs_{name}.svg',
+                    bbox_inches='tight', dpi=300)
+        plt.close()
+
 
     def plot_snapshot(self, s, iteration):
         # s: (L, L, n_layers)
@@ -490,9 +534,9 @@ def majority_vote_filter(values):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--index', type=int, default=0, help='Integer to characterize unique experiments')
-    parser.add_argument('-b', '--batch', type=int, default=25, help='Instances simulated in a batch')
+    parser.add_argument('-b', '--batch', type=int, default=100, help='Instances simulated in a batch')
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
-    parser.add_argument('--n_layers', type=int, default=11, help='Number of layers in the model')
+    parser.add_argument('--n_layers', type=int, default=2, help='Number of layers in the model')
     parser.add_argument('--n_steps', type=int, default=200, help='Number of steps for the dynamics simulation')
     parser.add_argument('--transient_steps', type=int, default=2000, help='Number of transient steps before dynamics')
     parser.add_argument('--coarse_grain_steps', type=int, default=1, help='Number of steps for coarse graining')
@@ -500,8 +544,8 @@ if __name__ == '__main__':
     parser.add_argument('--plot', type=bool, default=True, help='Whether to plot snapshots during simulation')
     parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
     parser.add_argument('--Ls', type=str, default='[64]', help='List of lattice lengths')
-    parser.add_argument('--gammas', type=str, default=f'{[element for element in np.logspace(-2, 1, num=24)]}', help='List of gamma values')
-    parser.add_argument('--Jzs', type=str, default=f'{[element for element in np.linspace(1.5, 5.5, num=24)]}', help='List of Jz values')
+    parser.add_argument('--gammas', type=str, default=f'{[0.05]}', help='List of gamma values')
+    parser.add_argument('--Jzs', type=str, default=f'{[3.0]}', help='List of Jz values')
     parser.add_argument('--out', type=str, default='data', help='Output data directory name')
     parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
@@ -544,12 +588,12 @@ if __name__ == '__main__':
                     histograms_L = model.dynamics(n_steps, transient_steps, plot=plot, init_ground_state=init_ground_state,
                                 coarse_grain_steps=coarse_grain_steps, connection_dist=connection_dist)
                     all_histograms.append(histograms_L)
-                if plot:
+                '''if plot:
                     if any([len(element[0]) > 0 for element in all_histograms]):
-                        plot_histogram_all_sizes(all_histograms, f'{Ls}_{gamma:.3f}_{Jz:.3f}_tw_{coarse_grain_steps}_{connection_dist}', Ls)
+                        plot_histogram_all_sizes(all_histograms, f'{Ls}_{gamma:.3f}_{Jz:.3f}_tw_{coarse_grain_steps}_{connection_dist}', Ls)'''
 
 #Loop for generating phase diagram
-    for L in Ls:
+    '''for L in Ls:
         for layer_idx in range(n_layers):
             phase_diagram_data = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
             phase_diagram_colors = [["" for _ in range(len(gammas))] for _ in range(len(Jzs))]
@@ -604,4 +648,4 @@ if __name__ == '__main__':
             ax.set_title(f'Layer {layer_idx}', fontsize=28)
 
             plt.savefig(f'figures/{L}_{coarse_grain_steps}_{layer_idx}_phase_diagram.png', dpi=300, bbox_inches='tight')
-            plt.close()
+            plt.close()'''
