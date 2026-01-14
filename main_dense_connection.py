@@ -38,6 +38,7 @@ class Model:
         self.Jz_std = Jz_std
         self.g = g
         self.gamma = gamma
+        #self.gamma_hetero = torch.clamp(torch.normal(self.gamma, 0.4*self.gamma, size=(n_layers, batch, L, L)), min=1e-3)
         self.delta = delta
         self.dt = dt
         self.init_scale = init_scale
@@ -56,6 +57,7 @@ class Model:
         else:
             self.J = J
         self.s = init_scale * (2 * torch.rand(batch, L, L, n_layers) - 1)
+        self.s_dot = torch.zeros(batch, L, L, n_layers)
         self.x = init_scale * torch.rand(2, batch, L, L)
 
         self.s_x = np.arange(L)
@@ -84,8 +86,8 @@ class Model:
 
         self.name_str = f'{L}_{gamma:.3f}_{Jz:.3f}'
         self.data_dir = data_dir
-        self.snapshot_dir = 'figures_time_lapsed_correlation'
-        self.histogram_dir = 'histograms_time_lapsed_correlation'
+        self.snapshot_dir = 'figures_time_lap_deriv_corr_bound'
+        self.histogram_dir = 'histograms_time_lap_deriv_corr_bound'
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.snapshot_dir, exist_ok=True)
         os.makedirs(self.histogram_dir, exist_ok=True)
@@ -100,7 +102,10 @@ class Model:
         Jss = torch.stack([Jp[0, :, :, :, 0] * sp[:, :, :, 0] * sp[:, :, :, 0].roll(1, 1),
                            Jp[1, :, :, :, 0] * sp[:, :, :, 0] * sp[:, :, :, 0].roll(1, 2)], dim=0)
         C = (Jss[:, :, :-1, :-1] + 1) / 2
+        #Constant gamma
         dx = self.gamma * (C - self.delta)
+        #Heterogenous gamma
+        #dx = self.gamma_hetero * (C - self.delta)
 
         # (batch, L+1, L+1, L+1)
         ds = Jp[0] * sp.roll(1, 1) + Jp[0].roll(-1, 1) * sp.roll(-1, 1) \
@@ -123,7 +128,7 @@ class Model:
         k4, l4 = self.f((s + k3 * self.dt).clamp(-1, 1), (x + l3 * self.dt).clamp(0, 1))
         s = (s + (k1 + 2 * k2 + 2 * k3 + k4) * self.dt / 6).clamp(-1, 1)
         x = (x + (l1 + 2 * l2 + 2 * l3 + l4) * self.dt / 6).clamp(0, 1)
-        return s, x
+        return s, x, (k1 + 2 * k2 + 2 * k3 + k4)/6
 
     @torch.no_grad()
     def dynamics(self, n_steps, transient_steps, coarse_grain_steps=1, connection_dist=10, plot=False, init_ground_state=False):
@@ -136,28 +141,32 @@ class Model:
             J_temp = self.J.clone()
             self.J[2] = 0  # Set Jz to 0, allow each layer to evolve towards ground state first
             for i in trange(500):
-                self.s, self.x = compiled_step(self.s, self.x)
+                self.s, self.x, self.s_dot = compiled_step(self.s, self.x)
             self.J[2] = J_temp[2]  # Restore Jz
 
         for i in trange(transient_steps):
-            self.s, self.x = compiled_step(self.s, self.x)
+            self.s, self.x, self.s_dot = compiled_step(self.s, self.x)
 
         print(f'L = {self.L} gamma = {self.gamma:.3f} Jz = {self.Jz:.3f} Simulating dynamics: {n_steps}')
 
         plot_steps = 10000
 
         spin_traj = []
-        full_spin_traj = []
+        #full_spin_traj = []
+        full_spin_deriv_traj = []
 
         for i in trange(n_steps):
             if plot:
-                if i % plot_steps == 0:
+                '''if i % plot_steps == 0:
                     # flip = (self.s * s0) < 0
                     # self.plot_snapshot(flip[0], i // plot_steps)
-                    self.plot_snapshot(self.s[0], i // plot_steps)
-            self.s, self.x = compiled_step(self.s, self.x)
+                    self.plot_snapshot(self.s[0], i // plot_steps)'''
+            self.s, self.x, self.s_dot = compiled_step(self.s, self.x)
             spin_traj.append(self.s > 0)
-            full_spin_traj.append(self.s)
+            #full_spin_traj.append(self.s)
+            bounded_spin_deriv_traj_int = torch.where((self.s == -1.0) & (self.s_dot < 0), 0, self.s_dot)
+            bounded_spin_deriv_traj = torch.where((self.s == 1.0) & (self.s_dot > 0), 0, bounded_spin_deriv_traj_int)
+            full_spin_deriv_traj.append(bounded_spin_deriv_traj)
 
         avalanche_stats_all = torch.zeros(self.n_layers, 5)
         metrics = torch.zeros(self.n_layers, 1)
@@ -165,11 +174,12 @@ class Model:
         histograms = np.empty(self.n_layers, dtype=object)
 
         spin_traj = torch.stack(spin_traj, dim=0)
-        full_spin_traj = torch.stack(full_spin_traj, dim=0)
+        #full_spin_traj = torch.stack(full_spin_traj, dim=0)
+        full_spin_deriv_traj = torch.stack(full_spin_deriv_traj, dim=0)
         use_optimal_window = False
         for layer_idx in range(self.n_layers):
             spin_traj_i = spin_traj[:, :, :, :, layer_idx]
-            window_steps = coarse_grain_steps #connection_dist (if using YH's updated cluster-finding code)
+            window_steps = coarse_grain_steps #connection_dist #(if using YH's updated cluster-finding code)
             t_idx = (torch.arange(int(n_steps / window_steps)) * window_steps).to(torch.int64)
             flip_traj_i = spin_traj_i[t_idx].clone().diff(dim=0)
 
@@ -184,7 +194,7 @@ class Model:
             _, clusters, _, _, _, is_percolating = \
                     find_cluster_GPU(flip_traj_i, self.edges, self.coordinate)'''
 
-            #Avalanche extraction (from trajectories, with Chesson's code)
+            '''#Avalanche extraction (from trajectories, with Chesson's code)
             flip_traj_i = flip_traj_i.permute(1, 0, 2, 3)
             temp_clusters = []
             for j in range(batch):
@@ -192,7 +202,7 @@ class Model:
                 with open(f'{self.data_dir}/{self.name_str}_{coarse_grain_steps}_{connection_dist}_{layer_idx}_clusters_sizes_{j}.json', 'w') as f:
                     json.dump(temp_clusters_j, f)
                 temp_clusters.append(temp_clusters_j)
-            clusters = [item for sublist in temp_clusters for item in sublist]
+            clusters = [item for sublist in temp_clusters for item in sublist]'''
 
             '''#Avalanche extraction (from .json files)
             temp_clusters = []
@@ -203,7 +213,7 @@ class Model:
             clusters = [item for sublist in temp_clusters for item in sublist]'''
 
 
-            avalanche_stats_i, histogram_i, phase_i = self.avalanche_stats(torch.tensor(clusters))
+            '''avalanche_stats_i, histogram_i, phase_i = self.avalanche_stats(torch.tensor(clusters))
             avalanche_stats_all[layer_idx] = torch.tensor(avalanche_stats_i, dtype=torch.float32)
             t_windows_all[layer_idx] = coarse_grain_steps * connection_dist
             histograms[layer_idx] = histogram_i
@@ -213,21 +223,21 @@ class Model:
             if use_optimal_window:
                 connection_dist = None
 
-        avalanche_stats_all = torch.cat([avalanche_stats_all, t_windows_all], dim=1)
+        avalanche_stats_all = torch.cat([avalanche_stats_all, t_windows_all], dim=1)'''
 
         if plot:
-            if any([len(element[0]) > 0 for element in histograms]):
-                self.plot_histogram_all_layers(histograms, f'{self.name_str}_{coarse_grain_steps}_{connection_dist}_all')
-            self.plot_correlation_overlap(full_spin_traj, f'{self.name_str}')
-            self.plot_spin_trajs(full_spin_traj, f'{self.name_str}')
-            for layer_idx in range(self.n_layers):
+            #if any([len(element[0]) > 0 for element in histograms]):
+                #self.plot_histogram_all_layers(histograms, f'{self.name_str}_{coarse_grain_steps}_{connection_dist}_all')
+            self.plot_correlation_overlap(full_spin_deriv_traj, f'{self.name_str}') #full_spin_traj
+            self.plot_trajs(full_spin_deriv_traj, f'{self.name_str}') #full_spin_traj
+            '''for layer_idx in range(self.n_layers):
                 histogram = histograms[layer_idx]
                 if len(histogram[0]) > 0:
                     self.plot_histogram(histogram, f'{self.name_str}_'
                                                    f'tw_{coarse_grain_steps}_{connection_dist}_'
-                                                   f'layer{layer_idx}')
-        if self.save:
-            torch.save(avalanche_stats_all, f'{self.data_dir}/avalanche_stats_{self.name_str}_{self.repeat_idx}.pt')
+                                                   f'layer{layer_idx}')'''
+        #if self.save:
+            #torch.save(avalanche_stats_all, f'{self.data_dir}/avalanche_stats_{self.name_str}_{self.repeat_idx}.pt')
 
         return histograms
 
@@ -395,43 +405,82 @@ class Model:
                         bbox_inches='tight', dpi=300)
         plt.close()
     
-    def plot_correlation_overlap(self, full_spin_trajs, name):
-        full_spin_trajs = full_spin_trajs.cpu().numpy()
-        J_z = torch.sign(self.J[2, :, :, :, 0]).cpu().numpy() #only considers first instance in batch
-        fig, ax = plt.subplots(figsize=(5, 4))
+    def plot_correlation_overlap(self, full_trajs, name):
+        full_trajs = full_trajs.cpu().numpy()
         tau = np.arange(100)
         #t = np.arange(100)
-        layer_0_spins = full_spin_trajs[:, :, :, :, 0] #only considers first instance in batch
-        layer_1_spins = full_spin_trajs[:, :, :, :, 1] #only considers first instance in batch
-        correlations = [np.mean([np.mean([np.mean(J_z[b]*layer_0_spins[t_idv][b]*layer_1_spins[t_idv+tau_idv][b]) for t_idv in range(100)]) for b in range(batch)]) for tau_idv in tau]
-        ax.plot(tau, correlations)
-        ax.set_xlabel(r'Time Delay $\tau$')
-        ax.set_ylabel(r'$\tilde{G}(\tau)$')
-        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}.png',
+        
+        #Layers 0 and 1
+        fig_0, ax_0 = plt.subplots(figsize=(5, 4))
+        J_z_0 = torch.sign(self.J[2, :, :, :, 0]).cpu().numpy()
+        layer_lower_spins_0 = full_trajs[:, :, :, :, 0]
+        layer_upper_spins_0 = full_trajs[:, :, :, :, 1]
+        correlations_0 = [np.mean([np.mean([np.mean(J_z_0[b]*layer_lower_spins_0[t_idv][b]*layer_upper_spins_0[t_idv+tau_idv][b]) for t_idv in range(100)]) for b in range(batch)]) for tau_idv in tau]
+        ax_0.plot(tau, correlations_0)
+        ax_0.set_xlabel(r'Time Delay $\tau$')
+        ax_0.set_ylabel(r'$\tilde{G}(\tau)$')
+        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}_0_1.png',
                     bbox_inches='tight', dpi=300)
-        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}.svg',
-                    bbox_inches='tight', dpi=300)
-        plt.close()
-    
-    def plot_spin_trajs(self, full_spin_trajs, name):
-        full_spin_trajs = full_spin_trajs.cpu().numpy()
-        fig, ax = plt.subplots(figsize=(5, 4))
-        t = np.arange(200)
-        colors = ['red', 'orange', 'green', 'blue', 'purple']
-        for i in range(5):
-            color = colors[i]
-            x = random.randint(0, 63)
-            y = random.randint(0, 63)
-            ax.plot(t, full_spin_trajs[:, 0, x, y, 0], color=color) #only considers first instance in batch
-            ax.plot(t, full_spin_trajs[:, 0, x, y, 1], color=color, linestyle='dashed') #only considers first instance in batch
-        ax.set_xlabel(r'Time $t$')
-        ax.set_ylabel(r'Spin $s$')
-        plt.savefig(f'{self.histogram_dir}/spin_trajs_{name}.png',
-                    bbox_inches='tight', dpi=300)
-        plt.savefig(f'{self.histogram_dir}/spin_trajs_{name}.svg',
+        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}_0_1.svg',
                     bbox_inches='tight', dpi=300)
         plt.close()
 
+        #Layers 1 and 2
+        fig_1, ax_1 = plt.subplots(figsize=(5, 4))
+        J_z_1 = torch.sign(self.J[2, :, :, :, 1]).cpu().numpy()
+        layer_lower_spins_1 = full_trajs[:, :, :, :, 1]
+        layer_upper_spins_1 = full_trajs[:, :, :, :, 2]
+        correlations_1 = [np.mean([np.mean([np.mean(J_z_1[b]*layer_lower_spins_1[t_idv][b]*layer_upper_spins_1[t_idv+tau_idv][b]) for t_idv in range(100)]) for b in range(batch)]) for tau_idv in tau]
+        ax_1.plot(tau, correlations_1)
+        ax_1.set_xlabel(r'Time Delay $\tau$')
+        ax_1.set_ylabel(r'$\tilde{G}(\tau)$')
+        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}_1_2.png',
+                    bbox_inches='tight', dpi=300)
+        plt.savefig(f'{self.histogram_dir}/correlation_overlap_time_avg_{name}_1_2.svg',
+                    bbox_inches='tight', dpi=300)
+        plt.close()
+    
+    def plot_trajs(self, full_trajs, name):
+        full_trajs = full_trajs.cpu().numpy()
+        t = np.arange(200)
+        colors = ['red', 'orange', 'green', 'blue', 'purple']
+        i = 0
+
+        #Layers 0 and 1
+        fig_0, ax_0 = plt.subplots(figsize=(5, 4))
+        while i < 5:
+            x = random.randint(0, 63)
+            y = random.randint(0, 63)
+            if np.any(full_trajs[:, 0, x, y, 0] != 0): #only considers first instance in batch
+                color = colors[i]
+                ax_0.plot(t, full_trajs[:, 0, x, y, 0], color=color) #only considers first instance in batch
+                ax_0.plot(t, full_trajs[:, 0, x, y, 1], color=color, linestyle='dashed') #only considers first instance in batch
+                i += 1
+        ax_0.set_xlabel(r'Time $t$')
+        ax_0.set_ylabel(r'$\dot{s}$') #r'Spin $s$'
+        plt.savefig(f'{self.histogram_dir}/trajs_{name}_0_1.png',
+                    bbox_inches='tight', dpi=300)
+        plt.savefig(f'{self.histogram_dir}/trajs_{name}_0_1.svg',
+                    bbox_inches='tight', dpi=300)
+        plt.close()
+
+        #Layers 1 and 2
+        fig_1, ax_1 = plt.subplots(figsize=(5, 4))
+        while i < 5:
+            x = random.randint(0, 63)
+            y = random.randint(0, 63)
+            if np.any(full_trajs[:, 0, x, y, 1] != 0): #only considers first instance in batch
+                color = colors[i]
+                ax_1.plot(t, full_trajs[:, 0, x, y, 1], color=color) #only considers first instance in batch
+                ax_1.plot(t, full_trajs[:, 0, x, y, 2], color=color, linestyle='dashed') #only considers first instance in batch
+                i += 1
+        ax_1.set_xlabel(r'Time $t$')
+        ax_1.set_ylabel(r'$\dot{s}$') #r'Spin $s$'
+        plt.savefig(f'{self.histogram_dir}/trajs_{name}_1_2.png',
+                    bbox_inches='tight', dpi=300)
+        plt.savefig(f'{self.histogram_dir}/trajs_{name}_1_2.svg',
+                    bbox_inches='tight', dpi=300)
+        plt.close()
 
     def plot_snapshot(self, s, iteration):
         # s: (L, L, n_layers)
@@ -536,7 +585,7 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--index', type=int, default=0, help='Integer to characterize unique experiments')
     parser.add_argument('-b', '--batch', type=int, default=100, help='Instances simulated in a batch')
     parser.add_argument('--Jz_std', type=float, default=0.0, help='Standard deviation of Jz')
-    parser.add_argument('--n_layers', type=int, default=2, help='Number of layers in the model')
+    parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in the model')
     parser.add_argument('--n_steps', type=int, default=200, help='Number of steps for the dynamics simulation')
     parser.add_argument('--transient_steps', type=int, default=2000, help='Number of transient steps before dynamics')
     parser.add_argument('--coarse_grain_steps', type=int, default=1, help='Number of steps for coarse graining')
@@ -545,7 +594,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_GPU', type=bool, default=True, help='Whether to use GPU')
     parser.add_argument('--Ls', type=str, default='[64]', help='List of lattice lengths')
     parser.add_argument('--gammas', type=str, default=f'{[0.05]}', help='List of gamma values')
-    parser.add_argument('--Jzs', type=str, default=f'{[3.0]}', help='List of Jz values')
+    parser.add_argument('--Jzs', type=str, default=f'{[3.0, 8.0]}', help='List of Jz values')
     parser.add_argument('--out', type=str, default='data', help='Output data directory name')
     parser.add_argument('--init_ground_state', action='store_true', help='Whether to initialize the ground state before dynamics')
     args = parser.parse_args()
